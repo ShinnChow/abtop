@@ -1,7 +1,7 @@
 use super::process::{self, ProcInfo};
 use crate::model::{
-    AgentSession, ChatMessage, ChatRole, ChildProcess, RateLimitInfo, SessionStatus, ToolCall,
-    MAX_CHAT_MESSAGES,
+    AgentSession, ChatMessage, ChatRole, ChildProcess, LaunchSurface, RateLimitInfo, SessionStatus,
+    ToolCall, MAX_CHAT_MESSAGES,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -630,6 +630,7 @@ impl CodexCollector {
         Some((
             AgentSession {
                 agent_cli: "codex",
+                launch_surface: LaunchSurface::Cli,
                 pid: display_pid,
                 session_id: result.session_id,
                 cwd: result.cwd,
