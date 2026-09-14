@@ -1304,12 +1304,11 @@ fn parse_codex_jsonl(path: &Path) -> Option<CodexJSONLResult> {
                 // custom_tool_call; both forms have the same lifecycle.
                 if matches!(item_type, Some("function_call" | "custom_tool_call")) {
                     if let Some(name) = payload["name"].as_str() {
-                        // Extract first arg (typically file path or command)
                         let arg = if item_type == Some("custom_tool_call") {
-                            payload["input"]
-                                .as_str()
-                                .map(sanitize_tool_arg)
-                                .unwrap_or_default()
+                            // Custom inputs are opaque scripts or patch bodies,
+                            // which can contain private file contents. Show only
+                            // the tool name; token-prefix redaction is insufficient.
+                            String::new()
                         } else {
                             payload["arguments"]
                                 .as_str()
@@ -2212,6 +2211,73 @@ mod tests {
         assert_eq!(session.tool_calls[0].name, "exec");
         assert!(session.pending_since_ms > 0);
         assert_eq!(session.thinking_since_ms, 0);
+    }
+
+    #[test]
+    fn test_codex_custom_tool_payloads_stay_out_of_display_data() {
+        for (name, input) in [
+            (
+                "apply_patch",
+                "*** Begin Patch\n*** Add File: .env\n+PASSWORD=private-test-value\n*** End Patch",
+            ),
+            (
+                "exec",
+                "await tools.exec_command({cmd: 'printf private-test-value > .env'});",
+            ),
+            ("future_tool", "private-test-value"),
+        ] {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            let call = serde_json::json!({
+                "type": "response_item",
+                "timestamp": "2026-03-28T15:01:06Z",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": name,
+                    "input": input,
+                    "call_id": "private_call"
+                }
+            });
+            write_lines(
+                &mut file,
+                &[
+                    SESSION_META,
+                    r#"{"type":"event_msg","timestamp":"2026-03-28T15:01:00Z","payload":{"type":"task_started"}}"#,
+                    &call.to_string(),
+                ],
+            );
+
+            let collector = CodexCollector::new();
+            let mut process_info = HashMap::new();
+            process_info.insert(42, proc_info(42, 1, "codex"));
+            let (session, _) = collector
+                .load_session_with_rate_limit(
+                    owned_process(42),
+                    file.path(),
+                    &process_info,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+
+            // These fields feed the TUI, --once, and JSON snapshots.
+            assert_eq!(session.current_tasks, vec![name.to_string()]);
+            assert_eq!(session.tool_calls.len(), 1);
+            assert_eq!(session.tool_calls[0].name, name);
+            assert!(session.tool_calls[0].arg.is_empty());
+            assert_eq!(session.status, SessionStatus::Executing);
+            assert_eq!(session.pending_since_ms, 1_774_710_066_000);
+
+            write_lines(
+                &mut file,
+                &[r#"{"type":"response_item","timestamp":"2026-03-28T15:01:09Z","payload":{"type":"custom_tool_call_output","call_id":"private_call","output":"private-test-value"}}"#],
+            );
+            let result = parse_codex_jsonl(file.path()).unwrap();
+            assert!(result.current_task.is_empty());
+            assert!(result.tool_calls[0].arg.is_empty());
+            assert_eq!(result.tool_calls[0].duration_ms, 3_000);
+            assert_eq!(result.pending_since_ms, 0);
+            assert!(result.model_generating);
+        }
     }
 
     #[test]
